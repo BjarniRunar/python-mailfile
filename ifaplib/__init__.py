@@ -16,9 +16,9 @@ available form of standards compliant "cloud storage" available to the general
 public. This makes an IMAP account a compelling location for app backups or
 basic synchronization.
 
-Other storage solutions that can "pretend to be Python's imaplib" should work
-as well. Included is the class `backends.FilesystemIMAP` which reads/writes
-from files on disk using a variant of the Maildir format.
+Other storage solutions that present the same API as Python's imaplib should
+work as well. Included is one such solution, `backends.FilesystemIMAP`, which
+reads/writes from files on disk using a variant of the Maildir format.
 
 See the doc-strings for `IFAP.synchronize` for a description of the protocol
 itself and `IFAP.encode_object` to read about the message format in IMAP.
@@ -61,14 +61,14 @@ class IFAP_File(StringIO):
     """
     def __init__(self, ifap, file_path, mode, metadata, *args, **kwargs):
         StringIO.__init__(self, *args, **kwargs)
-        self._file_path = _file_path
+        self._file_path = file_path
         self._open_mode = mode
         self._ifap = ifap
         self._lock = ifap._lock
         self._metadata = metadata
 
-    file_path = property(lambda: self._file_path)
-    metadata = property(lambda: self._metadata)
+    file_path = property(lambda self: self._file_path)
+    metadata = property(lambda self: self._metadata)
 
     def __enter__(self, *args, **kwargs):
         self._lock.acquire()
@@ -88,28 +88,54 @@ class IFAP_File(StringIO):
     def close(self, *args, **kwargs):
         if 'w' in self._open_mode or 'a' in self._open_mode:
             self._ifap._set_file(self)
+            self._ifap = None  # Break reference cycle
         else:
             StringIO.close(self, *args, **kwargs)
 
 
-class _IFAP_Config(object):
+class IFAP_Config(object):
+    """
+    This class represents the current configuration of your IFAP storage.
+    Access and manipulate it using the `IFAP.config` property. Take special
+    note of the fact that settings get reverted when exiting a `with IFAP`.
+
+    Available settings:
+
+       <config>.subject           Subject used in IMAP messages
+       <config>.email_to          Address for To-header in IMAP messages
+       <config>.email_from        Address for From-header in IMAP messages
+
+       <config>.buffering         Boolean: whether or not to buffer changes
+       <config>.buffer_max_bytes  Force a flush if we buffer more than this
+
+       <config>.key               Current encryption key
+       <config>.fernet            Current encryption engine
+       <config>.encrypt           Boolean: whether to encrypt or not
+
+    Important: The key and fernet settings should not be modified directly,
+    please use `IFAP.set_encryption_key()` instead.
+    """
     @classmethod
-    def Copy(cls, obj):
+    def _Copy(cls, obj):
         return cls(
-            obj.buffering_max_bytes,
-            obj.buffering,
-            obj.encrypt,
-            obj.fernet,
-            obj.key)
+            obj.buffering_max_bytes, obj.buffering,
+            obj.subject, obj.email_to, obj.email_from,
+            obj.encrypt, obj.fernet, obj.key)
 
     def __init__(self,
             buffering_max_bytes=102400,
             buffering=False,
+            subject='[IFAP] File Storage',
+            email_to='.. <to@ifap.example>',
+            email_from='.. <from@ifap.example>',
             encrypt=False,
             fernet=None,
             key=None):
         self.buffering_max_bytes = buffering_max_bytes
         self.buffering = buffering
+        self.subject = subject
+        self.email_to = email_to
+        self.email_from = email_from
         self.encrypt = encrypt
         self.fernet = fernet
         self.key = key
@@ -118,8 +144,8 @@ class _IFAP_Config(object):
 class IFAP(object):
     _SNAPSHOT_FILE_PATH = 'IFAP/metadata.json'
 
-    def __init__(self, imap_obj, base_folder, **kwargs):
-        self.config = _IFAP_Config(**kwargs)
+    def __init__(self, imap_obj, base_folder='FILE_STORAGE', **kwargs):
+        self.config = IFAP_Config(**kwargs)
         self.imap = imap_obj
         self._base_folder = base_folder
         self._lock = threading.RLock()
@@ -129,16 +155,24 @@ class IFAP(object):
         self._tree = {}
 
     def __enter__(self, *args, **kwargs):
+        """
+        When used in a `with ifap ...` statement, the IFAP object is locked
+        and changes are buffered in RAM until a threshold is reached, the
+        user calls `<instance>.flush()` or the block is exited.
+
+        Note that changes to `<instance>.config` made within a `with` block
+        are reverted when the block is exited; this allows an application to
+        turn encryption on or off temporarily.
+        """
         self._lock.acquire()
-        self._sstack.append(_IFAP_Config.Copy(self.config))
+        self._sstack.append(IFAP_Config._Copy(self.config))
         self.config.buffering = True
         self.synchronize()
         return self
 
     def __exit__(self, *args, **kwargs):
-        self.config = self._sstack.pop(-1)
-        self._maybe_flush()
         self.synchronize()
+        self.config = self._sstack.pop(-1)
         self._lock.release()
 
     def synchronize(self):
@@ -161,8 +195,11 @@ class IFAP(object):
            5. Snapshot objects: ... FIXME ...
            6. All other messages are ignored.
 
+        ...FIXME FIXME FIXME...
         """
         with self._lock:
+            self.flush()
+
             if 'OK' != self.imap.select(self._base_folder)[0]:
                 raise IOError('Could not select: %s' % self._base_folder)
             (rv, (seqs,)) = self.imap.search(None, 'ALL')
@@ -170,7 +207,7 @@ class IFAP(object):
                 raise IOError(
                     'Could not search: %s (%s, [%s])'
                     % (self._base_folder, rv, seqs))
-            seqs = sorted([int(i) for i in seqs.split(' ')])
+            seqs = sorted([int(i) for i in seqs.split(' ') if i])
             broken = set([])
             to_delete = set([])
             for seq in reversed(seqs):
@@ -184,8 +221,10 @@ class IFAP(object):
                     parser = email.parser.Parser()
                     message = parser.parsestr(data[0][1], headersonly=True)
                     xifap = message['X-IFAP'].strip()
-                    if xifap[:1] != '{':
-                        xifap = self.config.fernet.decrypt(xifap)
+                    if xifap[:1] == '!':
+                        xifap = self.config.fernet.decrypt(xifap[1:])
+                    else:
+                        xifap = base64.b64decode(xifap)
                     metadata = json.loads(xifap)
                     file_path = metadata['fn']
                 except (ValueError, NameError, AttributeError, KeyError,
@@ -212,7 +251,7 @@ class IFAP(object):
 
     def _maybe_encrypt(self, data, b64encode=False):
         if self.config.encrypt:
-            return self.config.fernet.encrypt(data)
+            return '!' + self.config.fernet.encrypt(data)
         if b64encode:
             return base64.b64encode(data)
         return data
@@ -229,19 +268,44 @@ class IFAP(object):
 
     def encode_object(self, file_path, file_data, metadata=None):
         """
-        FIXME: Document the format.
+        Encode (and optionally encrypt) an IFAP object for storage in IMAP.
+        Returns a RFC2822 formatted string suitable for storage in IMAP.
+
+        An IFAP encoded object is an RFC2822 message, with an X-IFAP header
+        that contains the message metadata, and exactly one MIME part of type
+        `application/x-ifap` containing any file data. Other (ornamental)
+        headers or MIME parts may be present for compability and usability.
+
+        Both the metadata and the file data may be encrypted using `Fernet`
+        from the `cryptography` library (AES-128, etc). Before encrypting,
+        the file data is padded by adding garbage to the end and the
+        metadata may contain a `_` attribute with padding as well.
+
+        When not encrypting, both are base64 encoded. Encrypted data is
+        prefixed with a '!' character to differentiate it from clear-text.
+
+        The metadata is a JSON-encoded dictionary, which always contains at
+        least `fn` and `bytes` key/value pairs, the previous of which is the
+        file's full path and name (within the IFAP filesystem) and the latter
+        is the size in bytes of the data. The value of the `bytes` attribute
+        is used to remove padding when decoding/decrypting.
+
+        Any other metadata (object type, descriptions, deletion tombstones)
+        is preserved, but it is up to the application to ensure that it all
+        serializes safely to/from JSON and is not too large.
         """
-        mdata = {'fn': file_path, 'bytes': len(file_data)}
+        mdata = {}
         if metadata:
             mdata.update(metadata)
-        xifap = json.dumps(mdata, indent=1)
+        mdata.update({'fn': file_path, 'bytes': len(file_data)})
+        xifap = json.dumps(mdata, indent=1).strip()
 
         if self.config.encrypt:
             # Note: The padding numbers, 148 and 2048, are chosen in part to
             #       keep small files below 3*1500 bytes: three network packets
             #       assuming a common network MTU, and <one 4KB block on disk.
             encoding = '7bit'
-            subject = '...'
+            subject = self.config.subject
             filename = 'ifap.enc'
             padding = ('_' * 200)
             mdata['_'] = padding[:148 - (len(xifap) % 148)]
@@ -249,16 +313,16 @@ class IFAP(object):
             file_data += (' ' * (2048 - (len(file_data) % 2048)))
         else:
             encoding = 'base64'
-            subject = file_path
+            subject = '%s: %s' % (self.config.subject, file_path)
             filename = os.path.basename(file_path)
 
         return '\r\n'.join([
-            'To: .. <to@ifap.example>',
-            'From: .. <from@ifap.example>',
+            'To: %s' % self.config.email_to,
+            'From: %s' % self.config.email_from,
             'Subject: %s' % subject,
             'X-IFAP:',
             self._reflow(
-                self._maybe_encrypt(xifap),
+                self._maybe_encrypt(xifap, b64encode=True),
                 indent=' ', preserve=(not self.config.encrypt)),
             'Content-Type: application/x-ifap',
             'Content-Transfer-Encoding: %s' % encoding,
@@ -282,8 +346,10 @@ class IFAP(object):
     def flush(self):
         """
         Write any buffered changes to the remote server. This gets called
-        automatically when exiting a `with ifap ...` block.
+        automatically when exiting a `with ifap ...` block. Returns True
+        upon success, False if there was a problem writing to the server.
         """
+        happy = True
         with self._lock:
             for file_path in self._unwritten.keys():
                 eml = self.encode_object(
@@ -293,7 +359,8 @@ class IFAP(object):
                     self._unwritten_bytes -= len(self._unwritten[file_path])
                     del self._unwritten[file_path]
                 else:
-                    print('Failed: %s' % d)
+                    happy = False
+        return happy
 
     def _maybe_flush(self):
         if (not self.config.buffering
@@ -302,12 +369,14 @@ class IFAP(object):
 
     def _set_file(self, file_obj):
         with self._lock:
-            file_obj.ifap = None  # Break reference cycle
             self._unwritten[file_obj.file_path] = file_obj
             self._unwritten_bytes += len(file_obj)
             self._maybe_flush()
 
     def open(self, file_path, mode='r'):
+        """
+        Open an IFAP file for reading, writing or appending.
+        """
         with self._lock:
             contents = ''
             metadata = {}

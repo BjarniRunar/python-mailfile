@@ -1,11 +1,17 @@
 #!/usr/bin/python
+import random
+
 from ifaplib import IFAP
 from ifaplib.backends import FilesystemIMAP
 
 ifap = IFAP(FilesystemIMAP('/tmp/foo', create=0o775), 'IFAP')
-ifap.set_encryption_key('hello world')
+
+if random.randint(0, 2) == 0:
+    ifap.set_encryption_key('hello world')
 
 with ifap:
+    ifap.config.subject = 'IFAP Test Script'
+
     print('This is awesome: %s' % (ifap.config.key or '(no crypto)'))
     with ifap.open('/hello/world', 'rw') as fd:
         fd.write('one\n') 
