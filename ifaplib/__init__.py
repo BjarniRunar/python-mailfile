@@ -30,13 +30,23 @@ import hashlib
 import json
 import os
 import re
+import stat
 import threading
+import time
 import zlib
 
 from StringIO import StringIO
 from base64 import urlsafe_b64encode
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
+
+
+def _clean_path(path):
+    while path[:1] == '/':
+        path = path[1:]
+    while path[-1:] == '/':
+        path = path[:-1]
+    return path.replace('//', '/')
 
 
 class IFAP_File(StringIO):
@@ -88,6 +98,7 @@ class IFAP_File(StringIO):
 
     def close(self, *args, **kwargs):
         if 'w' in self._open_mode or 'a' in self._open_mode:
+            self.metadata['ts'] = int(time.time())
             self._ifap._set_file(self)
             self._ifap = None  # Break reference cycle
         else:
@@ -472,11 +483,47 @@ class IFAP(object):
 
             return self._parse_message(file_path, data[0][1])
 
-    def open(self, file_path, mode='r', version=None):
-        """
-        Open an IFAP file for reading, writing or appending.
-        """
+    def listdir(self, file_path):
+        """Emulate os.listdir() for a given path."""
+        dirents = []
         with self._lock:
+            clean_path = _clean_path(file_path)
+            if clean_path:
+                clean_path += '/'
+            potentials = [k for k in self._tree if k.startswith(clean_path)]
+            if potentials:
+                dirents = ['.', '..']
+            for p in potentials:
+                dirents.append(p[len(clean_path):].split('/')[0])
+        if not dirents:
+            raise OSError('No such file or directory: `%s`' % file_path) 
+        return sorted(list(set(dirents)))
+
+    def lstat(self, file_path, fh=None):
+        """Emulate os.lstat() for a given path."""
+        try:
+            info = self._tree[_clean_path(file_path)]
+            mode = stat.S_IFREG | 0o600
+            size = info[1].get('bytes', 0)
+            ts = info[1].get('t', 0)
+        except KeyError:
+            subdirs = self.listdir(file_path)
+            size = len(subdirs)
+            mode = stat.S_IFDIR | 0o700
+            ts = 0
+        return {
+            'st_atime': ts,
+            'st_ctime': ts,
+            'st_nlink': 1,
+            'st_mode': mode,
+            'st_size': size,
+            'st_gid': os.getgid(),
+            'st_uid': os.getuid()}
+
+    def open(self, file_path, mode='r', version=None):
+        """Open an IFAP file for reading, writing or appending."""
+        with self._lock:
+            file_path = _clean_path(file_path)
             contents = ''
             metadata = {}
             if 'r' in mode or 'a' in mode:
@@ -488,9 +535,9 @@ class IFAP(object):
                 else:
                     try:
                         metadata, contents = self._get_file(file_path, version)
-                    except (OSError, IOError, KeyError):
-                        if 'w' not in mode:
-                            raise
+                    except (OSError, IOError, KeyError, ValueError) as e:
+                        if 'w' not in mode and 'a' not in mode:
+                            raise OSError('Error open(%s): %s' % (file_path, e))
                         metadata = {}
                         contents = ''
             return IFAP_File(self, file_path, mode, metadata, contents)

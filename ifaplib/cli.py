@@ -202,9 +202,10 @@ def _ls_command(opts, args):
 Example: python -m ifaplib ls -l /
 Options:
     -l, --metadata     List full metadata for each file
+    -a, --all          List all files
 
-Defaults to listing all files, if any arguments are present
-the list will be filtered only matching files."""
+Defaults to listing the root directory, if any arguments are present it
+will list those directories instead."""
     opts = dict(opts)
 
     verbose = ('-l' in opts or '--long' in opts or '--metadata' in opts)
@@ -213,6 +214,8 @@ the list will be filtered only matching files."""
             ll = max(len(f) for f in files)
             fmt = '%%-%d.%ds %%s' % (ll, ll)
             for f in files:
+                if f in ('.', '..'):
+                    continue
                 print(fmt % (f, json.dumps({
                     'metadata': ifap._tree[f][1],
                     'versions': sorted(list(ifap._tree[f][2]))},
@@ -221,19 +224,38 @@ the list will be filtered only matching files."""
             print('\n'.join(files))
 
     with _get_ifap() as ifap:
-        files = sorted(ifap._tree.keys())
-    if files:
-        if not args:
-            _ls(files)
+        if '-a' in opts or '--all' in opts:
+            flist = sorted(ifap._tree.keys())
+        elif not args:
+            flist = ifap.listdir('/')
         else:
             flist = []
             for prefix in args:
-                flist.extend([f for f in files if f.startswith(prefix)])
-            if flist:
-                _ls(sorted(list(set(flist))))
+                flist.extend(ifap.listdir(prefix))
+        if flist:
+            _ls(sorted(list(set(flist))))
     return True
 
- 
+
+def _mount_command(opts, args):
+    """Mount an IFAP filesystem using FUSE
+
+Example: python -m ifaplib mount ./tmp
+Options:
+    -v, --verbose     Log activity to STDERR.
+
+The process will hang, you can put it in the background yourself if you
+prefer."""
+    try:
+        from .fuse_driver import mount
+    except ImportError as e:
+        _fail('Is fusepy installed? Error: %s' % e, 98)
+    opts = dict(opts)
+    verbose = ('-v' in opts or '--verbose' in opts)
+    mount(_get_ifap(), args[0], verbose=verbose)
+    return True
+
+
 def _logout_command(opts, args):
     """Log out from an IMAP/IFAP server
 
@@ -321,11 +343,12 @@ Examples:
 
 _COMMANDS = [
     ('help',   (_help_command,   '',      [])),
-    ('ls',     (_ls_command,     'l',     ['long', 'metadata'])),
+    ('ls',     (_ls_command,     'al',     ['all', 'long', 'metadata'])),
     ('put',    (_put_command,    'vr',    ['verbose', 'recurse'])),
     ('get',    (_get_command,    'vrfV:', ['verbose', 'recurse', 'force',
                                            'version='])),
     ('cat',    (_cat_command,    'V:',    ['version='])),
+    ('mount',  (_mount_command,  'v',     ['verbose'])),
     ('login',  (_login_command,  '',      ['imap=', 'username=', 'mailbox=',
                                            'password=', '--key='])),
     ('logout', (_logout_command, '',     []))]
