@@ -84,6 +84,7 @@ These all do roughly what you would expect:
    * Does append mode work or make sense?
    * Data injection attack: prefer mode that requires encryption?
    * More testing: does it work with the popular IMAP servers?
+   * Implement CLI put --recursive command
    * File locking would be nice
 
 

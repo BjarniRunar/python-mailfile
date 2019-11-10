@@ -91,9 +91,9 @@ def _put_command(opts, args):
 Example: python -m ifaplib put README.md setup.py /tmp
 Options:
     -v, --verbose     Report progress on stdout
-    -r, --recurse     Upload entire directory trees
 
 The last argument should be the destination directory."""
+# FIXME:  -r, --recurse     Upload entire directory trees
     dest = _clean_path(args.pop(-1))
     opts = dict(opts)
     for fn in args:
