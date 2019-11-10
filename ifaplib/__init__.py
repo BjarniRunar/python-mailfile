@@ -25,6 +25,7 @@ itself and `IFAP.encode_object` to read about the message format in IMAP.
 """
 
 import base64
+import copy
 import email.parser
 import hashlib
 import json
@@ -47,6 +48,13 @@ def _clean_path(path):
     while path[-1:] == '/':
         path = path[:-1]
     return path.replace('//', '/')
+
+
+def _clean_metadata(metadata):
+    for k in ('_', 'fn'):
+        if k in metadata:
+            del metadata[k]
+    return metadata
 
 
 class IFAP_File(StringIO):
@@ -94,7 +102,7 @@ class IFAP_File(StringIO):
         self.seek(0, mode=2)
         p2 = self.tell()
         self.seek(p0)
-        return p2 
+        return p2
 
     def close(self, *args, **kwargs):
         if 'w' in self._open_mode or 'a' in self._open_mode:
@@ -154,7 +162,7 @@ class IFAP_Config(object):
 
 
 class IFAP(object):
-    _SNAPSHOT_FILE_PATH = 'IFAP/metadata.json'
+    _SNAPSHOT_FILE_PATH = 'IFAP/metadata'
 
     def __init__(self, imap_obj, base_folder='FILE_STORAGE', **kwargs):
         self.config = IFAP_Config(**kwargs)
@@ -188,7 +196,7 @@ class IFAP(object):
         self.config = self._sstack.pop(-1)
         self._lock.release()
 
-    def synchronize(self, cleanup=False):
+    def synchronize(self, cleanup=False, snapshot=None, ignore_snapshot=False):
         """
         This method implements the IFAP synchronization protocol, bringing
         our in-memory metadata index up to date with what is on the server.
@@ -222,6 +230,7 @@ class IFAP(object):
 
             distance = 0
             seqs = sorted([int(i) for i in seqs.split(' ') if i])
+            existing = set(seqs)
             broken = set([])
             to_delete = set([])
             for seq in reversed(seqs):
@@ -244,27 +253,31 @@ class IFAP(object):
                     continue
 
                 if self._tree.get(file_path, (-1,))[0] < seq:
-                    self._clean_metadata(metadata)
+                    _clean_metadata(metadata)
                     versions = set([seq])
                     if file_path in self._tree:
                         versions |= self._tree[file_path][2]
                     self._tree[file_path] = (seq, metadata, versions)
-                    if file_path == self._SNAPSHOT_FILE_PATH:
+                    if file_path == self._SNAPSHOT_FILE_PATH and not ignore_snapshot:
                         try:
-                            self._parse_snapshot(seq)
+                            self._parse_snapshot(seq, existing)
                         except ValueError:
                             print('FIXME: Corrupt snapshot, what to do?')
 
             if cleanup:
                 # Go through the tree, decide what to keep...
                 keeping = set([])
-                for fp in self._tree:
+                for fp in self._tree.keys():
                     seq, metadata, versions = self._tree[fp]
                     wanted = metadata.get('versions', 1)
                     versions.add(seq)
-                    keeping_versions = set(sorted(versions)[-wanted:]) 
+                    keeping_versions = existing & set(sorted(versions)[-wanted:])
                     keeping |= keeping_versions
-                    self._tree[fp] = (seq, metadata, keeping_versions)
+                    if keeping_versions:
+                        self._tree[fp] = (
+                            max(keeping_versions), metadata, keeping_versions)
+                    else:
+                        del self._tree[fp]
 
                 to_delete = sorted(list(self._seen - keeping))
                 if to_delete:
@@ -276,7 +289,8 @@ class IFAP(object):
                     if rs == re == 'OK':
                         self._seen -= set(to_delete)
 
-            if distance > 20:
+            self._seen &= existing
+            if (snapshot is not False) and (distance > 20 or snapshot is True):
                 self.save_snapshot()
 
     def save_snapshot(self):
@@ -291,17 +305,20 @@ class IFAP(object):
                 'tree': dict((fp, _j(self._tree[fp])) for fp in self._tree),
                 'seen': list(self._seen)})))
 
-    def _parse_snapshot(self, seq):
-        metadata, contents = self._get_file(self._SNAPSHOT_FILE_PATH, seq) 
+    def _parse_snapshot(self, seq, existing):
+        metadata, contents = self._get_file(self._SNAPSHOT_FILE_PATH, seq)
         snapshot = json.loads(zlib.decompress(contents))
         for file_path in snapshot['tree']:
             seq, metadata, versions = snapshot['tree'][file_path]
-            versions = set(versions)
+            if seq not in existing:
+                continue
+            versions = set(versions) & existing
             if file_path in self._tree:
-                versions |= self._tree[file_path][2]
+                versions.update(self._tree[file_path][2] & existing)
+                self._tree[file_path][2].update(versions)
             if file_path not in self._tree or seq > self._tree[file_path][0]:
                 self._tree[file_path] = (seq, metadata, versions)
-        self._seen |= set(snapshot['seen'])
+        self._seen |= (set(snapshot['seen']) & existing)
 
     def _maybe_encrypt(self, data, b64encode=False):
         if self.config.encrypt:
@@ -428,11 +445,6 @@ class IFAP(object):
             self._unwritten_bytes += len(file_obj)
             self._maybe_flush()
 
-    def _clean_metadata(self, metadata):
-        for k in ('_', 'fn'):
-            if k in metadata:
-                del metadata[k]
-
     def _parse_message(self, file_path, data, headersonly=False, clean=True):
         if headersonly:
             parser = email.parser.HeaderParser()
@@ -451,7 +463,7 @@ class IFAP(object):
             raise IOError('File path mismatch: %s' % metadata['fn'])
 
         if clean:
-            self._clean_metadata(metadata)
+            _clean_metadata(metadata)
 
         if headersonly:
             return metadata
@@ -474,7 +486,7 @@ class IFAP(object):
             if version is not None:
                 if version not in versions:
                     raise KeyError('Unknown version: %s' % version)
-                    seq = version
+                seq = version
 
             (rv, data) = self.imap.uid('FETCH', str(seq), '(BODY[])')
             if rv != 'OK':
@@ -490,13 +502,15 @@ class IFAP(object):
             clean_path = _clean_path(file_path)
             if clean_path:
                 clean_path += '/'
-            potentials = [k for k in self._tree if k.startswith(clean_path)]
+            potentials = [k for k in self._tree if k.startswith(clean_path)
+                          and not self._tree[k][1].get('deleted')
+                          and self._tree[k][0] in self._seen]
             if potentials:
                 dirents = ['.', '..']
             for p in potentials:
                 dirents.append(p[len(clean_path):].split('/')[0])
         if not dirents:
-            raise OSError('No such file or directory: `%s`' % file_path) 
+            raise OSError('No such file or directory: `%s`' % file_path)
         return sorted(list(set(dirents)))
 
     def lstat(self, file_path, fh=None):
@@ -520,26 +534,71 @@ class IFAP(object):
             'st_gid': os.getgid(),
             'st_uid': os.getuid()}
 
+    def remove(self, file_path, versions=None):
+        file_path = _clean_path(file_path)
+        with self._lock:
+            if file_path in self._unwritten:
+                del self._unwritten[file_path]
+
+            finfo = self._tree.get(file_path)
+            if finfo is None:
+                raise OSError('No such file: %s' % (file_path,))
+
+            if finfo[1].get('versions', 1) > 1 and not versions:
+                with self.open(file_path, 'w') as fd:
+                    fd.metadata['deleted'] = True
+                return self.synchronize(snapshot=True)
+
+            if not versions:
+                versions = copy.copy(finfo[2])
+            for version in versions:
+                if version not in finfo[2]:
+                    raise OSError('No such version: %s[%s]' % (file_path, version))
+
+            (rs, data) = self.imap.uid('STORE',
+                ','.join([str(s) for s in versions]),
+                '+FLAGS.SILENT',
+                '(\Deleted)')
+            if rs != 'OK':
+                raise OSError('Delete failed: %s' % data[0])
+            (re, data) = self.imap.expunge()
+
+            for v in versions:
+                finfo[2].remove(v)
+            if len(finfo[2]):
+                seq = max(finfo[2])
+                with self.open(file_path, 'r', version=seq) as fd:
+                    self._tree[file_path] = (
+                        seq, _clean_metadata(fd.metadata), finfo[2])
+            else:
+                del self._tree[file_path]
+
+            self.synchronize(cleanup=True, snapshot=True)
+
     def open(self, file_path, mode='r', version=None):
         """Open an IFAP file for reading, writing or appending."""
         with self._lock:
             file_path = _clean_path(file_path)
             contents = ''
             metadata = {}
-            if 'r' in mode or 'a' in mode:
-                mode = mode.replace('+', 'w')
-                if file_path in self._unwritten:
-                    file_obj = self._unwritten[file_path]
-                    contents = file_obj.getvalue()
-                    metadata = file_obj.metadata
-                else:
-                    try:
-                        metadata, contents = self._get_file(file_path, version)
-                    except (OSError, IOError, KeyError, ValueError) as e:
-                        if 'w' not in mode and 'a' not in mode:
-                            raise OSError('Error open(%s): %s' % (file_path, e))
-                        metadata = {}
-                        contents = ''
+            mode = mode.replace('+', 'w')
+            if file_path in self._unwritten:
+                file_obj = self._unwritten[file_path]
+                contents = file_obj.getvalue()
+                metadata = file_obj.metadata
+            else:
+                try:
+                    metadata, contents = self._get_file(file_path, version)
+                    if metadata.get('deleted'):
+                        if 'w' in mode or 'a' in mode:
+                            del metadata['deleted']
+                        raise OSError('File is deleted')
+                except (OSError, IOError, KeyError, ValueError) as e:
+                    if 'w' not in mode and 'a' not in mode:
+                        raise OSError('Error open(%s): %s' % (file_path, e))
+                    contents = ''
+            if 'r' not in mode and 'a' not in mode:
+                contents = ''
             return IFAP_File(self, file_path, mode, metadata, contents)
 
 

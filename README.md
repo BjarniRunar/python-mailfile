@@ -25,28 +25,65 @@ You will need:
    * Python 2.7 or 3.x (not sure which 3.x)
    * cryptography
 
+If you want to mount your IFAP using FUSE, you also need:
 
-## Shell examples:
+   * fusepy
 
-    ...
- 
-## Code example:
+
+## Shell examples
+
+These all do roughly what you would expect:
+
+    python -m ifaplib help
+
+    python -m ifaplib login
+
+    python -m ifaplib put README.md /project/
+
+    python -m ifaplib ls /
+
+    python -m ifaplib mount /path/to/mountpoint
+
+    python -m ifaplib logout
+
+
+## Code example
 
     from imaplib import IMAP4
     from ifaplib import IFAP
-  
+
     ifap = IFAP(IMAP4('imap.domain.com', 143), 'IFAP_DATA')
 
     # This is the key used to encrypt/decrypt our data
     ifap.set_encryption_key(your_secret_here)
 
     # Do whatever IMAP authentication dance you need, see imaplib.
-    ifap.imap.authenticate(...)
+    ifap.imap.login(...)
 
     with ifap:
         with ifap.open('/magic/path/name.txt', 'w') as fd:
             fd.write('hello world')
 
-        with ifap.open('/matic/path/name.txt', 'r') as fd:
-            print(fd.read())
+        # Trying to read the file here would fail, unless we sync state:
+        ifap.synchronize()
 
+    with ifap.open('/magic/path/name.txt', 'r') as fd:
+        print(fd.read())
+
+
+## TODO
+
+   * Does append mode work or make sense?
+   * Should we hard-code in a max file size and error out?
+   * Data injection attack: mode that requires encryption?
+   * Add an info command to the CLI, to get your encryption key etc.
+   * Recovery: synchronize mode that ignores snapshots
+   * More testing: does it work with the popular IMAP servers?
+   * File locking would be nice
+
+
+## Copyright, license, credits
+
+This code is: (C) Copyright 2019, Bjarni R. Einarsson <bre@mailpile.is>
+
+License terms are LGPLv3.

@@ -21,7 +21,6 @@ class FilesystemIMAP(object):
         self.sep = sep
         self.base_dir = base_dir
         self.selected = []
-        self.ls_cache = {}
         self.response_data = {}
         self.lock = threading.RLock()
         self.create_mode = create if isinstance(create, int) else 0o700
@@ -35,15 +34,14 @@ class FilesystemIMAP(object):
             return os.path.join(self.base_dir, path)
 
     def _list(self, path):
-        if path not in self.ls_cache:
-            self.ls_cache[path] = results = {}
-            for sub in ('cur', 'new'):
-                sub = os.path.join(path, sub)
-                if os.path.isdir(sub):
-                    results.update(dict(
-                        (self._fn_parse(fn)[0], fn)
-                        for fn in os.listdir(sub) if fn[:4] == 'eml-'))
-        return self.ls_cache[path]
+        results = {}
+        for sub in ('cur', 'new'):
+            sub = os.path.join(path, sub)
+            if os.path.isdir(sub):
+                results.update(dict(
+                    (self._fn_parse(fn)[0], fn)
+                    for fn in os.listdir(sub) if fn[:4] == 'eml-'))
+        return results
 
     def _fn_parse(self, fn):
         seq, flags = fn[4:].split(self.sep)
@@ -151,7 +149,7 @@ class FilesystemIMAP(object):
                     ('OK', [['', data]]))
         except (IOError, OSError, ValueError, KeyError, IndexError) as e:
             pass
-        return _l('FETCH', ('NO', ['Search failed: %s' % e]))
+        return _l('FETCH', ('NO', ['Fetch failed: %s' % e]))
 
     def close(self): return _l('CLOSE', ('OK', ['This is a noop']))
     def logout(self): return _l('LOGOUT', ('OK', ['This is a noop']))

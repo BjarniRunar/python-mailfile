@@ -69,6 +69,7 @@ class IFAP_Fuse(Operations):
     def readdir(self, path, fh):
         self._l('readdir(%s, %s)' % (path, fh))
         try:
+            self.ifap.synchronize()
             dirents = self.ifap.listdir(path)
             self._l(' -> %s' % (dirents,))
             for d in dirents:
@@ -98,7 +99,10 @@ class IFAP_Fuse(Operations):
 
     def unlink(self, path):
         self._l('unlink(%s)' % (path,))
-        raise FuseOSError(errno.EINVAL)
+        try:
+            self.ifap.remove(path)
+        except OSError:
+            raise FuseOSError(errno.EINVAL)
 
     def symlink(self, name, target):
         self._l('symlink(%s, %s)' % (name, target))
@@ -134,6 +138,7 @@ class IFAP_Fuse(Operations):
     def open(self, path, flags):
         self._l('open(%s, %s)' % (path, flags))
         try:
+            self.ifap.synchronize()
             fh = len(self.fhs) + 1
             self.fhs[fh] = (path, self.ifap.open(path, self._modestring(flags)))
             return fh
@@ -204,7 +209,7 @@ class IFAP_Fuse(Operations):
 
 
 def mount(ifap, mountpoint, verbose=False):
-    with ifap: 
-        FUSE(
-            IFAP_Fuse(ifap, verbose), mountpoint,
-            nothreads=True, foreground=True)
+    ifap.synchronize()
+    FUSE(
+        IFAP_Fuse(ifap, verbose), mountpoint,
+        nothreads=True, foreground=True)

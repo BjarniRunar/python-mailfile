@@ -36,7 +36,7 @@ def _load_creds():
 
 
 def _get_ifap(creds=None):
-    if creds is None: 
+    if creds is None:
         creds = _load_creds()
         if creds is None:
             _fail('Please log in first.', code=2)
@@ -194,8 +194,44 @@ multiple files."""
             with ifap.open(fn, 'r', version=version) as fd:
                 sys.stdout.write(fd.read())
     return True
- 
- 
+
+
+def _vers_command(opts, args):
+    """Set the desired number of versions for a file
+
+Example: python -m ifaplib vers 4 /tmp/README.md
+
+"""
+    opts = dict(opts)
+    versions = int(args.pop(0))
+    with _get_ifap() as ifap:
+        for fn in args:
+            with ifap.open(fn, 'r+') as fd:
+                fd.metadata['versions'] = versions
+        ifap.synchronize(snapshot=True)
+    return True
+
+
+def _rm_command(opts, args):
+    """Remove a file or files
+
+Example: python -m ifaplib rm /tmp/README.md
+Options:
+    --version=N       Remove a specific versions of the file
+
+Note: removing the deletion marker will undelete the file!
+"""
+    opts = dict(opts)
+    version = int(opts.get('-V', opts.get('--version', 0)))
+    if version and len(args) != 1:
+        _fail('Multiple files and --version are incompatible.')
+    with _get_ifap() as ifap:
+        for fn in args:
+            ifap.remove(fn, versions=([version] if version else None))
+        ifap.synchronize(cleanup=True, snapshot=True)
+    return True
+
+
 def _ls_command(opts, args):
     """List files
 
@@ -209,17 +245,20 @@ will list those directories instead."""
     opts = dict(opts)
 
     verbose = ('-l' in opts or '--long' in opts or '--metadata' in opts)
-    def _ls(files):
+    def _ls(ifap, files):
         if verbose:
             ll = max(len(f) for f in files)
             fmt = '%%-%d.%ds %%s' % (ll, ll)
             for f in files:
                 if f in ('.', '..'):
                     continue
-                print(fmt % (f, json.dumps({
-                    'metadata': ifap._tree[f][1],
-                    'versions': sorted(list(ifap._tree[f][2]))},
-                    sort_keys=True)))
+                if f in ifap._tree:
+                    print(fmt % (f, json.dumps({
+                        'metadata': ifap._tree[f][1],
+                        'versions': sorted(list(ifap._tree[f][2]))},
+                        sort_keys=True)))
+                else:
+                    print(fmt % (f, '{}'))
         else:
             print('\n'.join(files))
 
@@ -233,7 +272,7 @@ will list those directories instead."""
             for prefix in args:
                 flist.extend(ifap.listdir(prefix))
         if flist:
-            _ls(sorted(list(set(flist))))
+            _ls(ifap, sorted(list(set(flist))))
     return True
 
 
@@ -274,7 +313,7 @@ hand if you want them gone too.
 
 def _login_command(opts, args):
     """Log in to an IMAP/IFAP server
-    
+
 Options:
     --imap=host:port       Defaults to "localhost:143"
     --mailbox=mailbox      Defaults to "FILE_STORAGE"
@@ -343,11 +382,13 @@ Examples:
 
 _COMMANDS = [
     ('help',   (_help_command,   '',      [])),
-    ('ls',     (_ls_command,     'al',     ['all', 'long', 'metadata'])),
+    ('ls',     (_ls_command,     'al',    ['all', 'long', 'metadata'])),
     ('put',    (_put_command,    'vr',    ['verbose', 'recurse'])),
     ('get',    (_get_command,    'vrfV:', ['verbose', 'recurse', 'force',
                                            'version='])),
     ('cat',    (_cat_command,    'V:',    ['version='])),
+    ('rm',     (_rm_command,     'V:',    ['version='])),
+    ('vers',   (_vers_command,   '',      [])),
     ('mount',  (_mount_command,  'v',     ['verbose'])),
     ('login',  (_login_command,  '',      ['imap=', 'username=', 'mailbox=',
                                            'password=', '--key='])),
