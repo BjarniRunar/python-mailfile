@@ -5,7 +5,7 @@ __doc__ = """IMAP File Access Protocol
 The IMAP File Access Protocol defines a way to maintain a "filesystem" inside
 an IMAP folder. The filesystem can be symmetrically encrypted (using the
 cryptography library's AES-128 Fernet construct), it supports concurrent
-readers/writers, file versioning and basic file locking for synchronization.
+readers/writers and file versioning.
 
 Due to the fact that file data must live entirely in RAM and be transmitted in
 its entirety over the network after every change, IFAP is not well suited for
@@ -31,6 +31,7 @@ import json
 import os
 import re
 import threading
+import zlib
 
 from StringIO import StringIO
 from base64 import urlsafe_b64encode
@@ -153,6 +154,7 @@ class IFAP(object):
         self._unwritten = {}
         self._unwritten_bytes = 0
         self._tree = {}
+        self._seen = set([])
 
     def __enter__(self, *args, **kwargs):
         """
@@ -175,10 +177,13 @@ class IFAP(object):
         self.config = self._sstack.pop(-1)
         self._lock.release()
 
-    def synchronize(self):
+    def synchronize(self, cleanup=False):
         """
         This method implements the IFAP synchronization protocol, bringing
         our in-memory metadata index up to date with what is on the server.
+
+        If cleanup is requested, delete from IMAP any IFAP data that is no
+        longer needed.
 
         The synchronization protocol is as follows; it depends on messages
         in an IMAP folder receiving ascending, never-repeated integer IDs.
@@ -188,66 +193,104 @@ class IFAP(object):
            2. If we have seen and processed this message before, stop.
            3. File objects: If a message represents a new file or a NEWER
               version of one we've already seen, update our file index.
-              Otherwise, queue for deletion.
-           4. Lock objects: If a message represents a lock deletion, or an
-              OLDER but unexpired version of a lock we've already seen,
-              update our lock index. Otherwise, queue for deletion.
-           5. Snapshot objects: ... FIXME ...
-           6. All other messages are ignored.
-
-        ...FIXME FIXME FIXME...
+              If a file object is a snapshot, load and parse it.
+           4. All other messages are ignored.
         """
         with self._lock:
             self.flush()
-
             if 'OK' != self.imap.select(self._base_folder)[0]:
-                raise IOError('Could not select: %s' % self._base_folder)
-            (rv, (seqs,)) = self.imap.search(None, 'ALL')
+                if ('OK' != self.imap.create(self._base_folder)[0] or
+                        'OK' != self.imap.select(self._base_folder)[0]):
+                    raise IOError('Could not select: %s' % self._base_folder)
+
+            (rv, (seqs,)) = self.imap.uid('SEARCH', 'ALL')
             if rv != 'OK':
                 raise IOError(
                     'Could not search: %s (%s, [%s])'
                     % (self._base_folder, rv, seqs))
+
+            distance = 0
             seqs = sorted([int(i) for i in seqs.split(' ') if i])
             broken = set([])
             to_delete = set([])
             for seq in reversed(seqs):
-                if seq in to_delete:
-                    continue
-                (rv, data) = self.imap.fetch(str(seq), '(BODY.PEEK[]<0.1024>)')
-                if rv != 'OK':
-                    broken.add(seq)
-                    continue
+                if seq in self._seen:
+                    break
                 try:
-                    parser = email.parser.Parser()
-                    message = parser.parsestr(data[0][1], headersonly=True)
-                    xifap = message['X-IFAP'].strip()
-                    if xifap[:1] == '!':
-                        xifap = self.config.fernet.decrypt(xifap[1:])
-                    else:
-                        xifap = base64.b64decode(xifap)
-                    metadata = json.loads(xifap)
+                    (rv, data) = self.imap.uid(
+                        'FETCH', str(seq), '(BODY.PEEK[]<0.1024>)')
+                    if rv != 'OK':
+                        broken.add(seq)
+                        continue
+                    metadata = self._parse_message(
+                        None, data[0][1], headersonly=True, clean=False)
                     file_path = metadata['fn']
+                    self._seen.add(seq)
+                    distance += 1
                 except (ValueError, NameError, AttributeError, KeyError,
                         IndexError, InvalidToken):
                     broken.add(seq)
                     continue
 
-                if file_path == self._SNAPSHOT_FILE_PATH:
-                    print('FIXME: SNAPSHOT AT %s' % seq)
-                elif self._tree.get(file_path, (-1,))[0] >= seq:
-                    continue
-                else:
-                    for k in ('_', 'fn'):
-                        if k in metadata:
-                            del metadata[k]
+                if self._tree.get(file_path, (-1,))[0] < seq:
+                    self._clean_metadata(metadata)
+                    versions = set([seq])
                     if file_path in self._tree:
-                        to_delete.add(self._tree[file_path][0])
-                    self._tree[file_path] = (seq, metadata)
+                        versions |= self._tree[file_path][2]
+                    self._tree[file_path] = (seq, metadata, versions)
+                    if file_path == self._SNAPSHOT_FILE_PATH:
+                        try:
+                            self._parse_snapshot(seq)
+                        except ValueError:
+                            print('FIXME: Corrupt snapshot, what to do?')
 
-        # These are the messages we consider obsolete
-        to_delete |= (
-            set(seqs) - broken - set(k[0] for k in self._tree.values()))
-        print('FIXME: Delete these: %s' % to_delete)
+            if cleanup:
+                # Go through the tree, decide what to keep...
+                keeping = set([])
+                for fp in self._tree:
+                    seq, metadata, versions = self._tree[fp]
+                    wanted = metadata.get('versions', 1)
+                    versions.add(seq)
+                    keeping_versions = set(sorted(versions)[-wanted:]) 
+                    keeping |= keeping_versions
+                    self._tree[fp] = (seq, metadata, keeping_versions)
+
+                to_delete = sorted(list(self._seen - keeping))
+                if to_delete:
+                    (rs, data) = self.imap.uid('STORE',
+                        ','.join([str(s) for s in to_delete]),
+                        '+FLAGS.SILENT',
+                        '(\Deleted)')
+                    (re, data) = self.imap.expunge()
+                    if rs == re == 'OK':
+                        self._seen -= set(to_delete)
+
+            if distance > 20:
+                self.save_snapshot()
+
+    def save_snapshot(self):
+        """
+        Save a snapshot of the current metadata index back to IMAP.
+        """
+        def _j(smv):
+            seq, metadata, versions = smv
+            return [seq, metadata, list(versions)]
+        with self.open(self._SNAPSHOT_FILE_PATH, 'w') as fd:
+            fd.write(zlib.compress(json.dumps({
+                'tree': dict((fp, _j(self._tree[fp])) for fp in self._tree),
+                'seen': list(self._seen)})))
+
+    def _parse_snapshot(self, seq):
+        metadata, contents = self._get_file(self._SNAPSHOT_FILE_PATH, seq) 
+        snapshot = json.loads(zlib.decompress(contents))
+        for file_path in snapshot['tree']:
+            seq, metadata, versions = snapshot['tree'][file_path]
+            versions = set(versions)
+            if file_path in self._tree:
+                versions |= self._tree[file_path][2]
+            if file_path not in self._tree or seq > self._tree[file_path][0]:
+                self._tree[file_path] = (seq, metadata, versions)
+        self._seen |= set(snapshot['seen'])
 
     def _maybe_encrypt(self, data, b64encode=False):
         if self.config.encrypt:
@@ -352,8 +395,9 @@ class IFAP(object):
         happy = True
         with self._lock:
             for file_path in self._unwritten.keys():
+                fobj = self._unwritten[file_path]
                 eml = self.encode_object(
-                    file_path, self._unwritten[file_path].getvalue())
+                    file_path, fobj.getvalue(), metadata=fobj.metadata)
                 (rv, d) = self.imap.append(self._base_folder, None, None, eml)
                 if rv == 'OK':
                     self._unwritten_bytes -= len(self._unwritten[file_path])
@@ -373,7 +417,62 @@ class IFAP(object):
             self._unwritten_bytes += len(file_obj)
             self._maybe_flush()
 
-    def open(self, file_path, mode='r'):
+    def _clean_metadata(self, metadata):
+        for k in ('_', 'fn'):
+            if k in metadata:
+                del metadata[k]
+
+    def _parse_message(self, file_path, data, headersonly=False, clean=True):
+        if headersonly:
+            parser = email.parser.HeaderParser()
+        else:
+            parser = email.parser.Parser()
+        message = parser.parsestr(data, headersonly=headersonly)
+
+        xifap = message['X-IFAP'].strip()
+        if xifap[:1] == '!':
+            xifap = self.config.fernet.decrypt(xifap[1:])
+        else:
+            xifap = base64.b64decode(xifap)
+        metadata = json.loads(xifap)
+
+        if file_path and metadata['fn'] != file_path:
+            raise IOError('File path mismatch: %s' % metadata['fn'])
+
+        if clean:
+            self._clean_metadata(metadata)
+
+        if headersonly:
+            return metadata
+
+        for part in message.walk():
+            if part.get_content_type() == 'application/x-ifap':
+                contents = part.get_payload()
+                if contents[:1] == '!':
+                    contents = self.config.fernet.decrypt(contents[1:])
+                else:
+                    contents = base64.b64decode(contents)
+                return metadata, contents[:metadata['bytes']]
+
+        raise OSError(
+            'No data in message, %s is corrupt?' % (file_path or 'file'))
+
+    def _get_file(self, file_path, version):
+        with self._lock:
+            seq, metadata, versions = self._tree[file_path]
+            if version is not None:
+                if version not in versions:
+                    raise KeyError('Unknown version: %s' % version)
+                    seq = version
+
+            (rv, data) = self.imap.uid('FETCH', str(seq), '(BODY[])')
+            if rv != 'OK':
+                raise OSError(
+                    'Could not fetch: %s=%s (%s)' % (file_path, seq, data[0]))
+
+            return self._parse_message(file_path, data[0][1])
+
+    def open(self, file_path, mode='r', version=None):
         """
         Open an IFAP file for reading, writing or appending.
         """
@@ -383,9 +482,17 @@ class IFAP(object):
             if 'r' in mode or 'a' in mode:
                 mode = mode.replace('+', 'w')
                 if file_path in self._unwritten:
-                    contents = self._unwritten[file_path].getvalue()
+                    file_obj = self._unwritten[file_path]
+                    contents = file_obj.getvalue()
+                    metadata = file_obj.metadata
                 else:
-                    print('FIXME: Try to open the file and load the contents')
+                    try:
+                        metadata, contents = self._get_file(file_path, version)
+                    except (OSError, IOError, KeyError):
+                        if 'w' not in mode:
+                            raise
+                        metadata = {}
+                        contents = ''
             return IFAP_File(self, file_path, mode, metadata, contents)
 
 

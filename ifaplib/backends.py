@@ -1,5 +1,15 @@
 import os
+import sys
 import threading
+
+
+DEBUGGING = True
+
+
+def _l(cmd, rv):
+    if DEBUGGING:
+        sys.stderr.write('%-40.40s %s\n' % (cmd, ('%s' % (rv,))[:45]))
+    return rv
 
 
 class FilesystemIMAP(object):
@@ -14,8 +24,9 @@ class FilesystemIMAP(object):
         self.ls_cache = {}
         self.response_data = {}
         self.lock = threading.RLock()
+        self.create_mode = create if isinstance(create, int) else 0o700
         if create and not os.path.exists(base_dir):
-            os.mkdir(base_dir, 0o700 if (create is True) else create)
+            os.mkdir(base_dir, create_mode)
 
     def _path(self, path):
         if path == '/':
@@ -54,9 +65,9 @@ class FilesystemIMAP(object):
                 files[seq] = newfn
                 with open(os.path.join(mpath, 'cur', newfn), 'w') as fd:
                     fd.write(message.replace('\r\n', '\n'))
-                return ('OK', ['APPEND completed: %8.8x' % seq])
+                return _l('APPEND', ('OK', ['APPEND completed: %8.8x' % seq]))
         except (IOError, OSError, ValueError, KeyError, IndexError) as e:
-            return ('NO', ['APPEND failed: %s' % e])
+            return _l('APPEND', ('NO', ['APPEND failed: %s' % e]))
 
     def response(self, code):
         rv = self.response_data.get(code)
@@ -64,14 +75,38 @@ class FilesystemIMAP(object):
             del self.response_data[code]
         return rv
 
+    def uid(self, command, *args):
+        if command == 'SEARCH':
+            return self.search(None, *args)
+        if command == 'FETCH':
+            return self.fetch(*args)
+        if command == 'STORE':
+            return self.store(*args)
+        raise ValueError('Unknown command: %s' % command)
+
     def select(self, mailbox='INBOX', readonly=False):
         try:
+            mpath = self._path(mailbox)
+            if not os.path.exists(mpath) or not os.path.isdir(mpath):
+                raise OSError('Not a directory: %s' % mpath)
             self.response_data = {}
-            message_count = len(self._list(self._path(mailbox)))
+            message_count = len(self._list(mpath))
             self.selected = mailbox
-            return ('OK', [message_count])
+            return _l('SELECT %s' % mailbox, ('OK', [message_count]))
         except (IOError, OSError, ValueError, KeyError, IndexError) as e:
-            return ('NO', ['No such mailbox'])
+            return _l('SELECT', ('NO', ['No such mailbox: %s' % e]))
+
+    def create(self, mailbox):
+        try:
+            mpath = self._path(mailbox)
+            if not os.path.exists(mpath) or not os.path.isdir(mpath):
+                os.mkdir(mpath)
+                os.mkdir(os.path.join(mpath, 'cur'))
+                os.mkdir(os.path.join(mpath, 'new'))
+                os.mkdir(os.path.join(mpath, 'tmp'))
+            return _l('CREATE', ('OK', ['Created %s' % mailbox]))
+        except (IOError, OSError, ValueError, KeyError, IndexError) as e:
+            return _l('CREATE', ('NO', ['Failed: %s' % e]))
 
     def search(self, charset, *criteria):
         try:
@@ -80,9 +115,28 @@ class FilesystemIMAP(object):
                     raise ValueError('I am not very good at searching')
             with self.lock:
                 seqs = self._list(self._path(self.selected)).keys()
-                return ('OK', [' '.join('%d' % s for s in seqs)])
+                return _l('SEARCH', ('OK', [' '.join('%d' % s for s in seqs)]))
         except (IOError, OSError, ValueError, KeyError, IndexError) as e:
-            return ('NO', ['Search failed: %s' % e])
+            return _l('SEARCH', ('NO', ['Search failed: %s' % e]))
+
+    def store(self, message_set, command, flags):
+        if command not in ('+FLAGS', '+FLAGS.SILENT'):
+            raise ValueError('I do not know how to %s' % command)
+        if flags not in ('(\Deleted)', ):
+            raise ValueError('I do not know how to set %s' % flags)
+
+        mpath = self._path(self.selected)
+        files = self._list(mpath)
+        for seq in (int(s) for s in message_set.split(',')):
+            if seq not in files:
+                continue
+            for sub in ('cur', 'new'):
+                fn = os.path.join(mpath, sub, files[seq])
+                if os.path.exists(fn):
+                    os.remove(fn)
+        return _l(
+            'STORE %s %s %s' % (message_set, command, flags),
+            ('OK', [message_set]))
 
     def fetch(self, message_set, message_parts):
         try:
@@ -91,12 +145,14 @@ class FilesystemIMAP(object):
             files = self._list(mpath)
             for sub in ('cur', 'new'):
                 fn = os.path.join(mpath, sub, files[seq])
-                if os.path.exists(fn):
-                    data = open(fn, 'rb').read().replace('\n', '\r\n')
-                    return ('OK', [['', data]])
+                data = open(fn, 'rb').read().replace('\n', '\r\n')
+                return _l(
+                    'FETCH %s %s' % (message_set, message_parts),
+                    ('OK', [['', data]]))
         except (IOError, OSError, ValueError, KeyError, IndexError) as e:
             pass
-        return ('NO', ['Search failed: %s' % e])
+        return _l('FETCH', ('NO', ['Search failed: %s' % e]))
 
-    def close(self): return ('OK', ['This is a noop'])
-    def logout(self): return ('OK', ['This is a noop'])
+    def close(self): return _l('CLOSE', ('OK', ['This is a noop']))
+    def logout(self): return _l('LOGOUT', ('OK', ['This is a noop']))
+    def expunge(self): return _l('EXPUNGE', ('OK', ['This is a noop']))
