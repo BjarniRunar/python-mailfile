@@ -1,6 +1,6 @@
 from setuptools import setup
 
-from ifaplib import __version__, __author__
+from mailfile import __version__, __author__
 
 classifiers = [
     'Development Status :: 4 - Beta',
@@ -14,14 +14,14 @@ classifiers = [
     'Topic :: Software Development :: Libraries :: Python Modules']
 
 setup(
-    name = 'ifaplib',
+    name = 'mailfile',
     version = __version__,
     author = __author__,
     license = 'LGPLv3+',
     description = 'Encrypted IMAP File Storage',
-    url = 'https://github.com/BjarniRunar/python-ifaplib',
-    download_url = 'https://github.com/BjarniRunar/python-ifaplib/archive/v0.0.1.tar.gz',
+    url = 'https://github.com/BjarniRunar/python-mailfile',
+    download_url = 'https://github.com/BjarniRunar/python-mailfile/archive/v0.0.1.tar.gz',
     keywords = 'imap imap4 imaplib fuse cryptography',
     install_requires = ['cryptography'],
     classifiers = classifiers,
-    packages = ['ifaplib'])
+    packages = ['mailfile'])
