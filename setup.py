@@ -18,7 +18,7 @@ setup(
     version = __version__,
     author = __author__,
     license = 'LGPLv3+',
-    description = 'IMAP File Access Protocol',
+    description = 'Encrypted IMAP File Storage',
     url = 'https://github.com/BjarniRunar/python-ifaplib',
     download_url = 'https://github.com/BjarniRunar/python-ifaplib/archive/v0.0.1.tar.gz',
     keywords = 'imap imap4 imaplib fuse cryptography',

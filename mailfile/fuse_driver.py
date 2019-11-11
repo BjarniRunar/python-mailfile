@@ -1,26 +1,26 @@
-# This file is part of ifaplib
+# This file is part of Mailfile
 #
-# Ifaplib is free software: you can redistribute it and/or modify
+# Mailfile is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as
 # published by the Free Software Foundation, either version 3 of
 # the License, or (at your option) any later version.
 #
-# Ifaplib is distributed in the hope that it will be useful,
+# Mailfile is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with ifaplib. If not, see <https://www.gnu.org/licenses/>.
+# License along with Mailfile. If not, see <https://www.gnu.org/licenses/>.
 #
-"""FUSE driver for the IMAP File Access Protocol
+"""FUSE driver for Mailfile filesystems
 
-This is a basic FUSE driver for accessing an IFAP file store.
+This is a basic FUSE driver for accessing an Mailfile file store.
 
-Use it like so: python -m ifaplib mount /path/to/mountpoint
+Use it like so: python -m mailfile mount /path/to/mountpoint
 
 The only "weird magic" in this module is the stat cache that lets us pretend
-things like mkdir() succeed and have meaning, even though IFAP does not actually
+things like mkdir() succeed and have meaning, even though Mailfile does not actually
 have a concept of directories.
 """
 import errno
@@ -33,10 +33,10 @@ import time
 from fusepy import FUSE, FuseOSError, Operations
 
 
-class IFAP_Fuse(Operations):
-    def __init__(self, ifap, verbose):
+class Mailfile_Fuse(Operations):
+    def __init__(self, mailfile, verbose):
         self.root = '/tmp'
-        self.ifap = ifap
+        self.mailfile = mailfile
         self.verbose = verbose
         self.fhs = {}
         self.stat_cache = {}
@@ -70,7 +70,7 @@ class IFAP_Fuse(Operations):
     def getattr(self, path, fh=None):
         self._l('getattr(%s, %s)' % (path, fh))
         try:
-            stat = self.ifap.lstat(path)
+            stat = self.mailfile.lstat(path)
             if path in self.stat_cache:
                 del self.stat_cache[path]
             return self._l(' -> %s' % stat, stat)
@@ -84,8 +84,8 @@ class IFAP_Fuse(Operations):
     def readdir(self, path, fh):
         self._l('readdir(%s, %s)' % (path, fh))
         try:
-            self.ifap.synchronize()
-            dirents = self.ifap.listdir(path)
+            self.mailfile.synchronize()
+            dirents = self.mailfile.listdir(path)
             self._l(' -> %s' % (dirents,))
             for d in dirents:
                 yield d
@@ -115,7 +115,7 @@ class IFAP_Fuse(Operations):
     def unlink(self, path):
         self._l('unlink(%s)' % (path,))
         try:
-            self.ifap.remove(path)
+            self.mailfile.remove(path)
         except OSError:
             raise FuseOSError(errno.EINVAL)
 
@@ -153,9 +153,9 @@ class IFAP_Fuse(Operations):
     def open(self, path, flags):
         self._l('open(%s, %s)' % (path, flags))
         try:
-            self.ifap.synchronize()
+            self.mailfile.synchronize()
             fh = len(self.fhs) + 1
-            self.fhs[fh] = (path, self.ifap.open(path, self._modestring(flags)))
+            self.fhs[fh] = (path, self.mailfile.open(path, self._modestring(flags)))
             return fh
         except Exception as e:
             self._l(' -> %s' % (e,))
@@ -196,10 +196,10 @@ class IFAP_Fuse(Operations):
                     if fn == path:
                         fo.truncate(length)
                     return 0
-                fd = self.ifap.open(path, 'w')
+                fd = self.mailfile.open(path, 'w')
                 fd.truncate(length)
                 fd.close()
-                self.ifap.synchronize()
+                self.mailfile.synchronize()
                 return 0
         except KeyError:
             raise FuseOSError(errno.EBADFD)
@@ -212,19 +212,19 @@ class IFAP_Fuse(Operations):
         try:
             self.fhs[fh][1].close()  
             del self.fhs[fh]
-            self.ifap.synchronize()
+            self.mailfile.synchronize()
             return 0
         except KeyError as e:
             self._l(' -> ' % (e,))
             raise FuseOSError(errno.EBADFD)
 
     def fsync(self, path, fdatasync, fh):
-        self.ifap.synchronize()
+        self.mailfile.synchronize()
         return self._l('fsync(%s, %s, %s)' % (path, fdatasync, fh), 0)
 
 
-def mount(ifap, mountpoint, verbose=False):
-    ifap.synchronize()
+def mount(mailfile, mountpoint, verbose=False):
+    mailfile.synchronize()
     FUSE(
-        IFAP_Fuse(ifap, verbose), mountpoint,
+        Mailfile_Fuse(mailfile, verbose), mountpoint,
         nothreads=True, foreground=True)

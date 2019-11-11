@@ -1,42 +1,44 @@
-# This file is part of ifaplib
+# This file is part of Mailfile
 #
-# Ifaplib is free software: you can redistribute it and/or modify
+# Mailfile is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as
 # published by the Free Software Foundation, either version 3 of
 # the License, or (at your option) any later version.
 #
-# Ifaplib is distributed in the hope that it will be useful,
+# Mailfile is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with ifaplib. If not, see <https://www.gnu.org/licenses/>.
+# License along with Mailfile. If not, see <https://www.gnu.org/licenses/>.
 #
 __author__ = 'Bjarni R. Einarsson <bre@mailpile.is>'
 __version__ = '0.0.1'
-__doc__ = """IMAP File Access Protocol
+__doc__ = """Encrypted IMAP File Storage
 
-The IMAP File Access Protocol defines a way to maintain a "filesystem" inside
-an IMAP folder. The filesystem can be symmetrically encrypted (using the
-cryptography library's AES-128 Fernet construct), it supports concurrent
-readers/writers and file versioning.
+This library implements a simple "filesystem" inside an IMAP folder. The
+filesystem can be symmetrically encrypted (using the cryptography library's
+AES-128 Fernet construct), it supports concurrent readers/writers and file
+versioning.
 
 Due to the fact that file data must live entirely in RAM and be transmitted in
-its entirety over the network after every change, IFAP is not well suited for
-very large files. Please also be considerate towards the IMAP server admin!
+its entirety over the network after every change, Mailfile is not well suited
+for very large files. Please also be considerate towards the IMAP server admin!
 
 The motivation for this tool is that an IMAP account is the most commonly
 available form of standards compliant "cloud storage" available to the general
 public. This makes an IMAP account a compelling location for app backups or
-basic synchronization.
+basic synchronization, and Mailfile's sister project, Mailpile
+<https://www.mailpile.is/>, needs exactly such features...
 
 Other storage solutions that present the same API as Python's imaplib should
 work as well. Included is one such solution, `backends.FilesystemIMAP`, which
 reads/writes from files on disk using a variant of the Maildir format.
 
-See the doc-strings for `IFAP.synchronize` for a description of the protocol
-itself and `IFAP.encode_object` to read about the message format in IMAP.
+See the doc-strings for `Mailfile.synchronize` for a description of the
+protocol itself and `Mailfile.encode_object` to read about the message format
+in IMAP.
 """
 
 import base64
@@ -72,33 +74,33 @@ def _clean_metadata(metadata):
     return metadata
 
 
-class IFAP_File(StringIO):
+class Mailfile_File(StringIO):
     """
     This class presents a file-like interface (based on StringIO) to a file
-    stored in IFAP.
+    stored in Mailfile.
 
     All operations are in RAM until the file is closed, at which point (if
     the file was opened in a writable mode), the contents will be written
-    back to IFAP. Note that whether that triggers a write to the IMAP server
-    or just a write to cache, depends on the IFAP configuration. Please use
-    `IFAP.flush` if you need guarantees.
+    back to Mailfile. Note that whether that triggers a write to the IMAP server
+    or just a write to cache, depends on the Mailfile configuration. Please use
+    `Mailfile.flush` if you need guarantees.
 
-    Each IFAP_File object has two extra attributes, file_path and metadata:
+    Each Mailfile_File object has two extra attributes, file_path and metadata:
     the file_path is read-only, but the metadata object is a free-form dict
     of JSON-serializable data that gets stored along with the file. For
     performance reasons, only small amounts of information should be stored
     in metadata.
 
     In particular, the `versions` metadata attribute, if set, should be an
-    integer informing IFAP how many backups to keep of this file before
+    integer informing Mailfile how many backups to keep of this file before
     garbage collection.
     """
-    def __init__(self, ifap, file_path, mode, metadata, *args, **kwargs):
+    def __init__(self, mailfile, file_path, mode, metadata, *args, **kwargs):
         StringIO.__init__(self, *args, **kwargs)
         self._file_path = file_path
         self._open_mode = mode
-        self._ifap = ifap
-        self._lock = ifap._lock
+        self._mailfile = mailfile
+        self._lock = mailfile._lock
         self._metadata = metadata
 
     file_path = property(lambda self: self._file_path)
@@ -122,17 +124,17 @@ class IFAP_File(StringIO):
     def close(self, *args, **kwargs):
         if 'w' in self._open_mode or 'a' in self._open_mode:
             self.metadata['ts'] = int(time.time())
-            self._ifap._set_file(self)
-            self._ifap = None  # Break reference cycle
+            self._mailfile._set_file(self)
+            self._mailfile = None  # Break reference cycle
         else:
             StringIO.close(self, *args, **kwargs)
 
 
-class IFAP_Config(object):
+class Mailfile_Config(object):
     """
-    This class represents the current configuration of your IFAP storage.
-    Access and manipulate it using the `IFAP.config` property. Take special
-    note of the fact that settings get reverted when exiting a `with IFAP`.
+    This class represents the current configuration of your Mailfile storage.
+    Access and manipulate it using the `Mailfile.config` property. Take special
+    note of the fact that settings get reverted when exiting a `with Mailfile`.
 
     Available settings:
 
@@ -148,7 +150,7 @@ class IFAP_Config(object):
        <config>.encrypt           Boolean: whether to encrypt or not
 
     Important: The key and fernet settings should not be modified directly,
-    please use `IFAP.set_encryption_key()` instead.
+    please use `Mailfile.set_encryption_key()` instead.
     """
     @classmethod
     def _Copy(cls, obj):
@@ -160,9 +162,9 @@ class IFAP_Config(object):
     def __init__(self,
             buffering_max_bytes=102400,
             buffering=False,
-            subject='[IFAP] File Storage',
-            email_to='.. <to@ifap.example>',
-            email_from='.. <from@ifap.example>',
+            subject='[Mailfile] File Storage',
+            email_to='.. <to@mailfile.example>',
+            email_from='.. <from@mailfile.example>',
             encrypt=False,
             fernet=None,
             key=None):
@@ -176,11 +178,11 @@ class IFAP_Config(object):
         self.key = key
 
 
-class IFAP(object):
-    _SNAPSHOT_FILE_PATH = 'IFAP/metadata'
+class Mailfile(object):
+    _SNAPSHOT_FILE_PATH = 'Mailfile/metadata'
 
     def __init__(self, imap_obj, base_folder='FILE_STORAGE', **kwargs):
-        self.config = IFAP_Config(**kwargs)
+        self.config = Mailfile_Config(**kwargs)
         self.imap = imap_obj
         self._base_folder = base_folder
         self._lock = threading.RLock()
@@ -192,7 +194,7 @@ class IFAP(object):
 
     def __enter__(self, *args, **kwargs):
         """
-        When used in a `with ifap ...` statement, the IFAP object is locked
+        When used in a `with mailfile ...` statement, the Mailfile object is locked
         and changes are buffered in RAM until a threshold is reached, the
         user calls `<instance>.flush()` or the block is exited.
 
@@ -201,7 +203,7 @@ class IFAP(object):
         turn encryption on or off temporarily.
         """
         self._lock.acquire()
-        self._sstack.append(IFAP_Config._Copy(self.config))
+        self._sstack.append(Mailfile_Config._Copy(self.config))
         self.config.buffering = True
         self.synchronize()
         return self
@@ -213,16 +215,16 @@ class IFAP(object):
 
     def synchronize(self, cleanup=False, snapshot=None, ignore_snapshot=False):
         """
-        This method implements the IFAP synchronization protocol, bringing
+        This method implements the Mailfile synchronization protocol, bringing
         our in-memory metadata index up to date with what is on the server.
 
-        If cleanup is requested, delete from IMAP any IFAP data that is no
+        If cleanup is requested, delete from IMAP any Mailfile data that is no
         longer needed.
 
         The synchronization protocol is as follows; it depends on messages
         in an IMAP folder receiving ascending, never-repeated integer IDs.
 
-        1. Messages in IFAP are read and parsed in reverse order:
+        1. Messages in Mailfile are read and parsed in reverse order:
            1. If we cannot parse or decrypt the message, ignore it.
            2. If we have seen and processed this message before, stop.
            3. File objects: If a message represents a new file or a NEWER
@@ -354,12 +356,12 @@ class IFAP(object):
 
     def encode_object(self, file_path, file_data, metadata=None):
         """
-        Encode (and optionally encrypt) an IFAP object for storage in IMAP.
+        Encode (and optionally encrypt) an Mailfile object for storage in IMAP.
         Returns a RFC2822 formatted string suitable for storage in IMAP.
 
-        An IFAP encoded object is an RFC2822 message, with an X-IFAP header
+        An Mailfile encoded object is an RFC2822 message, with an X-Mailfile header
         that contains the message metadata, and exactly one MIME part of type
-        `application/x-ifap` containing any file data. Other (ornamental)
+        `application/x-mailfile` containing any file data. Other (ornamental)
         headers or MIME parts may be present for compability and usability.
 
         Both the metadata and the file data may be encrypted using `Fernet`
@@ -372,7 +374,7 @@ class IFAP(object):
 
         The metadata is a JSON-encoded dictionary, which always contains at
         least `fn` and `bytes` key/value pairs, the previous of which is the
-        file's full path and name (within the IFAP filesystem) and the latter
+        file's full path and name (within the Mailfile filesystem) and the latter
         is the size in bytes of the data. The value of the `bytes` attribute
         is used to remove padding when decoding/decrypting.
 
@@ -384,7 +386,7 @@ class IFAP(object):
         if metadata:
             mdata.update(metadata)
         mdata.update({'fn': file_path, 'bytes': len(file_data)})
-        xifap = json.dumps(mdata, indent=1).strip()
+        xmailfile = json.dumps(mdata, indent=1).strip()
 
         if self.config.encrypt:
             # Note: The padding numbers, 148 and 2048, are chosen in part to
@@ -392,10 +394,10 @@ class IFAP(object):
             #       assuming a common network MTU, and <one 4KB block on disk.
             encoding = '7bit'
             subject = self.config.subject
-            filename = 'ifap.enc'
+            filename = 'mailfile.enc'
             padding = ('_' * 200)
-            mdata['_'] = padding[:148 - (len(xifap) % 148)]
-            xifap = json.dumps(mdata, indent=1)
+            mdata['_'] = padding[:148 - (len(xmailfile) % 148)]
+            xmailfile = json.dumps(mdata, indent=1)
             file_data += (' ' * (2048 - (len(file_data) % 2048)))
         else:
             encoding = 'base64'
@@ -406,11 +408,11 @@ class IFAP(object):
             'To: %s' % self.config.email_to,
             'From: %s' % self.config.email_from,
             'Subject: %s' % subject,
-            'X-IFAP:',
+            'X-Mailfile:',
             self._reflow(
-                self._maybe_encrypt(xifap, b64encode=True),
+                self._maybe_encrypt(xmailfile, b64encode=True),
                 indent=' ', preserve=(not self.config.encrypt)),
-            'Content-Type: application/x-ifap',
+            'Content-Type: application/x-mailfile',
             'Content-Transfer-Encoding: %s' % encoding,
             'Content-Disposition: attachment; filename="%s"' % filename,
             '',
@@ -432,7 +434,7 @@ class IFAP(object):
     def flush(self):
         """
         Write any buffered changes to the remote server. This gets called
-        automatically when exiting a `with ifap ...` block. Returns True
+        automatically when exiting a `with mailfile ...` block. Returns True
         upon success, False if there was a problem writing to the server.
         """
         happy = True
@@ -467,12 +469,12 @@ class IFAP(object):
             parser = email.parser.Parser()
         message = parser.parsestr(data, headersonly=headersonly)
 
-        xifap = message['X-IFAP'].strip()
-        if xifap[:1] == '!':
-            xifap = self.config.fernet.decrypt(xifap[1:])
+        xmailfile = message['X-Mailfile'].strip()
+        if xmailfile[:1] == '!':
+            xmailfile = self.config.fernet.decrypt(xmailfile[1:])
         else:
-            xifap = base64.b64decode(xifap)
-        metadata = json.loads(xifap)
+            xmailfile = base64.b64decode(xmailfile)
+        metadata = json.loads(xmailfile)
 
         if file_path and metadata['fn'] != file_path:
             raise IOError('File path mismatch: %s' % metadata['fn'])
@@ -484,7 +486,7 @@ class IFAP(object):
             return metadata
 
         for part in message.walk():
-            if part.get_content_type() == 'application/x-ifap':
+            if part.get_content_type() == 'application/x-mailfile':
                 contents = part.get_payload()
                 if contents[:1] == '!':
                     contents = self.config.fernet.decrypt(contents[1:])
@@ -591,7 +593,7 @@ class IFAP(object):
             self.synchronize(cleanup=True, snapshot=True)
 
     def open(self, file_path, mode='r', version=None):
-        """Open an IFAP file for reading, writing or appending."""
+        """Open an Mailfile file for reading, writing or appending."""
         with self._lock:
             file_path = _clean_path(file_path)
             contents = ''
@@ -614,7 +616,7 @@ class IFAP(object):
                     contents = ''
             if 'r' not in mode and 'a' not in mode:
                 contents = ''
-            return IFAP_File(self, file_path, mode, metadata, contents)
+            return Mailfile_File(self, file_path, mode, metadata, contents)
 
 
 if __name__ == "__main__":

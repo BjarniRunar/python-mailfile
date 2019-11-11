@@ -1,22 +1,22 @@
-# This file is part of ifaplib
+# This file is part of Mailfile
 #
-# Ifaplib is free software: you can redistribute it and/or modify
+# Mailfile is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Lesser General Public License as
 # published by the Free Software Foundation, either version 3 of
 # the License, or (at your option) any later version.
 #
-# Ifaplib is distributed in the hope that it will be useful,
+# Mailfile is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with ifaplib. If not, see <https://www.gnu.org/licenses/>.
+# License along with Mailfile. If not, see <https://www.gnu.org/licenses/>.
 #
 """\
-Command Line Interface for interacting with IFAP filesystems.
+Command Line Interface for interacting with Mailfile filesystems.
 
-Run `python -m ifaplib help` for instructions.
+Run `python -m mailfile help` for instructions.
 """
 import base64
 import getopt
@@ -27,7 +27,7 @@ import json
 import os
 import sys
 
-from . import IFAP
+from . import Mailfile
 from .backends import FilesystemIMAP
 
 
@@ -37,7 +37,7 @@ def _fail(msg, code=1):
 
 
 def _loginfile():
-    return os.path.expanduser('~/.ifap-login')
+    return os.path.expanduser('~/.mailfile-login')
 
 
 def _load_creds():
@@ -50,7 +50,7 @@ def _load_creds():
         return None
 
 
-def _get_ifap(creds=None):
+def _get_mailfile(creds=None):
     if creds is None:
         creds = _load_creds()
         if creds is None:
@@ -71,10 +71,10 @@ def _get_ifap(creds=None):
         except cls.error as e:
             _fail('IMAP login failed: %s' % e, code=3)
 
-    ifap = IFAP(imap, creds['mailbox'])
+    mailfile = Mailfile(imap, creds['mailbox'])
     if creds['key'] and creds['key'] != 'None':
-        ifap.set_encryption_key(creds['key'])
-    return ifap
+        mailfile.set_encryption_key(creds['key'])
+    return mailfile
 
 
 def _clean_path(path):
@@ -86,9 +86,9 @@ def _clean_path(path):
 
 
 def _put_command(opts, args):
-    """Put a file or files in IFAP (upload)
+    """Put a file or files in Mailfile (upload)
 
-Example: python -m ifaplib put README.md setup.py /tmp
+Example: python -m mailfile put README.md setup.py /tmp
 Options:
     -v, --verbose     Report progress on stdout
 
@@ -101,7 +101,7 @@ The last argument should be the destination directory."""
             raise OSError("File not found: %s" % fn)
     if not args:
         return True
-    with _get_ifap() as ifap:
+    with _get_mailfile() as mailfile:
         for fn in args:
             if dest:
                 dest_fn = os.path.join(dest, os.path.basename(fn))
@@ -109,21 +109,21 @@ The last argument should be the destination directory."""
                 dest_fn = os.path.basename(fn)
             with open(fn, 'r') as fd:
                 data = fd.read()
-            with ifap.open(dest_fn, 'w') as fd:
+            with mailfile.open(dest_fn, 'w') as fd:
                 fd.write(data)
             if '--verbose' in opts or '-v' in opts:
-                print("%s -> ifap:%s" % (fn, dest_fn))
+                print("%s -> mailfile:%s" % (fn, dest_fn))
     return True
 
 
 def _get_command(opts, args):
-    """Fetch a file or files from IFAP (download)
+    """Fetch a file or files from Mailfile (download)
 
-This command will fetch its arguments from IFAP and store as local
+This command will fetch its arguments from Mailfile and store as local
 files. The name of the created files will be derived in the obvious
-way from the name in IFAP.
+way from the name in Mailfile.
 
-Example: python -m ifaplib get /tmp/README.md /tmp/README.txt .
+Example: python -m mailfile get /tmp/README.md /tmp/README.txt .
 Options:
     -v, --verbose     Report progress on stdout
     -r, --recurse     Fetch entire directory trees
@@ -135,7 +135,7 @@ specific version, it doesn't make sense to request multiple files."""
     dest_dir = args.pop(-1)
     if not os.path.exists(dest_dir) or not os.path.isdir(dest_dir):
          _fail('Not a directory: %s' % dest_dir)
-    ifap = _get_ifap()
+    mailfile = _get_mailfile()
 
     full_path = False
     def _fn(fn):
@@ -158,8 +158,8 @@ specific version, it doesn't make sense to request multiple files."""
     if '--recurse' in opts or '-r' in opts:
         full_path = True
         files = []
-        with ifap:
-            ls = sorted(ifap._tree.keys())
+        with mailfile:
+            ls = sorted(mailfile._tree.keys())
         for prefix in args:
             while prefix[:1] == '/':
                 prefix = prefix[1:]
@@ -175,24 +175,24 @@ specific version, it doesn't make sense to request multiple files."""
     version = int(opts.get('-V', opts.get('--version', 0))) or None
     if version and len(args) > 1:
         _fail('Multiple files and --version are incompatible.')
-    with ifap:
+    with mailfile:
         for fn in args:
             while fn[:1] == '/':
                 fn = fn[1:]
             target = _fn(fn)
             if full_path:
                 _pmkdir(target)
-            data = ifap.open(fn, 'r', version=version).read()
+            data = mailfile.open(fn, 'r', version=version).read()
             open(target, 'w').write(data)
             if '--verbose' in opts or '-v' in opts:
-                print("ifap:%s -> %s" % (fn, target))
+                print("mailfile:%s -> %s" % (fn, target))
     return True
 
 
 def _cat_command(opts, args):
-    """Print the contents of a file or files from IFAP
+    """Print the contents of a file or files from Mailfile
 
-Example: python -m ifaplib cat /tmp/README.md
+Example: python -m mailfile cat /tmp/README.md
 Options:
     --version=N       Request a specific versions of the file
 
@@ -202,11 +202,11 @@ multiple files."""
     version = int(opts.get('-V', opts.get('--version', 0))) or None
     if version and len(args) > 1:
         _fail('Multiple files and --version are incompatible.')
-    with _get_ifap() as ifap:
+    with _get_mailfile() as mailfile:
         for fn in args:
             while fn[:1] == '/':
                 fn = fn[1:]
-            with ifap.open(fn, 'r', version=version) as fd:
+            with mailfile.open(fn, 'r', version=version) as fd:
                 sys.stdout.write(fd.read())
     return True
 
@@ -214,23 +214,23 @@ multiple files."""
 def _vers_command(opts, args):
     """Set the desired number of versions for a file
 
-Example: python -m ifaplib vers 4 /tmp/README.md
+Example: python -m mailfile vers 4 /tmp/README.md
 
 """
     opts = dict(opts)
     versions = int(args.pop(0))
-    with _get_ifap() as ifap:
+    with _get_mailfile() as mailfile:
         for fn in args:
-            with ifap.open(fn, 'r+') as fd:
+            with mailfile.open(fn, 'r+') as fd:
                 fd.metadata['versions'] = versions
-        ifap.synchronize(snapshot=True)
+        mailfile.synchronize(snapshot=True)
     return True
 
 
 def _rm_command(opts, args):
     """Remove a file or files
 
-Example: python -m ifaplib rm /tmp/README.md
+Example: python -m mailfile rm /tmp/README.md
 Options:
     --version=N       Remove a specific versions of the file
 
@@ -240,17 +240,17 @@ Note: removing the deletion marker will undelete the file!
     version = int(opts.get('-V', opts.get('--version', 0)))
     if version and len(args) != 1:
         _fail('Multiple files and --version are incompatible.')
-    with _get_ifap() as ifap:
+    with _get_mailfile() as mailfile:
         for fn in args:
-            ifap.remove(fn, versions=([version] if version else None))
-        ifap.synchronize(cleanup=True, snapshot=True)
+            mailfile.remove(fn, versions=([version] if version else None))
+        mailfile.synchronize(cleanup=True, snapshot=True)
     return True
 
 
 def _ls_command(opts, args):
     """List files
 
-Example: python -m ifaplib ls -l /
+Example: python -m mailfile ls -l /
 Options:
     -l, --metadata     List full metadata for each file
     -a, --all          List all files
@@ -260,41 +260,41 @@ will list those directories instead."""
     opts = dict(opts)
 
     verbose = ('-l' in opts or '--long' in opts or '--metadata' in opts)
-    def _ls(ifap, files):
+    def _ls(mailfile, files):
         if verbose:
             ll = max(len(f) for f in files)
             fmt = '%%-%d.%ds %%s' % (ll, ll)
             for f in files:
                 if f in ('.', '..'):
                     continue
-                if f in ifap._tree:
+                if f in mailfile._tree:
                     print(fmt % (f, json.dumps({
-                        'metadata': ifap._tree[f][1],
-                        'versions': sorted(list(ifap._tree[f][2]))},
+                        'metadata': mailfile._tree[f][1],
+                        'versions': sorted(list(mailfile._tree[f][2]))},
                         sort_keys=True)))
                 else:
                     print(fmt % (f, '{}'))
         else:
             print('\n'.join(files))
 
-    with _get_ifap() as ifap:
+    with _get_mailfile() as mailfile:
         if '-a' in opts or '--all' in opts:
-            flist = sorted(ifap._tree.keys())
+            flist = sorted(mailfile._tree.keys())
         elif not args:
-            flist = ifap.listdir('/')
+            flist = mailfile.listdir('/')
         else:
             flist = []
             for prefix in args:
-                flist.extend(ifap.listdir(prefix))
+                flist.extend(mailfile.listdir(prefix))
         if flist:
-            _ls(ifap, sorted(list(set(flist))))
+            _ls(mailfile, sorted(list(set(flist))))
     return True
 
 
 def _mount_command(opts, args):
-    """Mount an IFAP filesystem using FUSE
+    """Mount an Mailfile filesystem using FUSE
 
-Example: python -m ifaplib mount ./tmp
+Example: python -m mailfile mount ./tmp
 Options:
     -v, --verbose     Log activity to STDERR.
 
@@ -306,14 +306,14 @@ prefer."""
         _fail('Is fusepy installed? Error: %s' % e, 98)
     opts = dict(opts)
     verbose = ('-v' in opts or '--verbose' in opts)
-    mount(_get_ifap(), args[0], verbose=verbose)
+    mount(_get_mailfile(), args[0], verbose=verbose)
     return True
 
 
 def _logout_command(opts, args):
-    """Log out from an IMAP/IFAP server
+    """Log out from an IMAP/Mailfile server
 
-This will delete your IMAP password from ~/.ifap-login.  Note that it
+This will delete your IMAP password from ~/.mailfile-login.  Note that it
 will leave the secret key and other settings intact, remove the file by
 hand if you want them gone too.
 """
@@ -327,7 +327,7 @@ hand if you want them gone too.
 
 
 def _login_command(opts, args):
-    """Log in to an IMAP/IFAP server
+    """Log in to an IMAP/Mailfile server
 
 Options:
     --imap=host:port       Defaults to "localhost:143"
@@ -337,13 +337,13 @@ Options:
     --key=random_string    Defaults to generating a new, strong key
 
 If the key is set to the string "None" (without the quotes), that
-will disable IFAP's encryption.
+will disable Mailfile's encryption.
 
 Setting the IMAP server to maildir:/path/to/folder will use the
 built-in local Maildir storage, instead of real IMAP.
 
-Warning: This will store your IMAP and IFAP access credentials,
-lightly obfuscated, in ~/.ifap-login. Use the logout command to
+Warning: This will store your IMAP and Mailfile access credentials,
+lightly obfuscated, in ~/.mailfile-login. Use the logout command to
 delete the IMAP password from this file."""
     defaults = _load_creds() or {}
     opts = dict(opts)
@@ -361,7 +361,7 @@ delete the IMAP password from this file."""
         creds['key'] = base64.b64encode(os.urandom(32)).strip()
         sys.stderr.write('Generated key: %s\n' % creds['key'])
 
-    _get_ifap(creds).synchronize()
+    _get_mailfile(creds).synchronize()
 
     with open(_loginfile(), 'w') as fd:
         os.chmod(_loginfile(), 0o600)
@@ -378,17 +378,17 @@ You can get further instructions on each command by running
         print('%s: %s' % (cmd, dict(_COMMANDS)[cmd][0].__doc__))
     if not args:
         print("""\
-This is the Command Line Interface for the IMAP File Access Protocol.
+This is the Command Line Interface for Mailfile filesystems
 
-Usage: python -m ifaplib <command> [options] [arguments...]
+Usage: python -m mailfile <command> [options] [arguments...]
 Commands:
 
 %(commands)s
 
 Examples:
-    python -m ifaplib help login
-    python -m ifaplib cat /project/README.md
-    python -m ifaplib ls -l
+    python -m mailfile help login
+    python -m mailfile cat /project/README.md
+    python -m mailfile ls -l
 """ % {'commands': '\n'.join([
             '    %-10.10s %s' % (cmd, synopsis[0].__doc__.splitlines()[0])
             for cmd, synopsis in _COMMANDS])})

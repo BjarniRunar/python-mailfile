@@ -1,25 +1,27 @@
-# python-ifaplib: IMAP File Access Protocol Library
+# python-mailfile: Encrypted IMAP File Storage
 
-The IMAP File Access Protocol defines a way to maintain a "filesystem" inside
-an IMAP folder. The filesystem can be symmetrically encrypted (using the
-cryptography library's AES-128 Fernet construct), it supports concurrent
-readers/writers and file versioning.
+This library implements a simple "filesystem" inside an IMAP folder. The
+filesystem can be symmetrically encrypted (using the cryptography library's
+AES-128 Fernet construct), it supports concurrent readers/writers and file
+versioning.
 
 Due to the fact that file data must live entirely in RAM and be transmitted in
-its entirety over the network after every change, IFAP is not well suited for
-very large files. Please also be considerate towards the IMAP server admin!
+its entirety over the network after every change, Mailfile is not well suited
+for very large files. Please also be considerate towards the IMAP server admin!
 
 The motivation for this tool is that an IMAP account is the most commonly
 available form of standards compliant "cloud storage" available to the general
 public. This makes an IMAP account a compelling location for app backups or
-basic synchronization.
+basic synchronization, and Mailfile's sister project,
+[Mailpile](https://www.mailpile.is/), needs exactly such features...
 
 Other storage solutions that present the same API as Python's imaplib should
 work as well. Included is one such solution, `backends.FilesystemIMAP`, which
 reads/writes from files on disk using a variant of the Maildir format.
 
-See the doc-strings for `IFAP.synchronize` for a description of the protocol
-itself and `IFAP.encode_object` to read about the message format in IMAP.
+See the doc-strings for `Mailfile.synchronize` for a description of the
+protocol itself and `Mailfile.encode_object` to read about the message format
+in IMAP.
 
 
 ## Dependencies
@@ -29,7 +31,7 @@ You will need:
    * Python 2.7
    * cryptography
 
-If you want to mount your IFAP using FUSE, you also need:
+If you want to mount your Mailfile using FUSE, you also need:
 
    * fusepy
 
@@ -38,40 +40,40 @@ If you want to mount your IFAP using FUSE, you also need:
 
 These all do roughly what you would expect:
 
-    python -m ifaplib help
+    python -m mailfile help
 
-    python -m ifaplib login
+    python -m mailfile login
 
-    python -m ifaplib put README.md /project/
+    python -m mailfile put README.md /project/
 
-    python -m ifaplib ls /
+    python -m mailfile ls /
 
-    python -m ifaplib mount /path/to/mountpoint
+    python -m mailfile mount /path/to/mountpoint
 
-    python -m ifaplib logout
+    python -m mailfile logout
 
 
 ## Code example
 
     from imaplib import IMAP4
-    from ifaplib import IFAP
+    from mailfile import Mailfile
 
-    ifap = IFAP(IMAP4('imap.domain.com', 143), 'IFAP_DATA')
+    mailfile = Mailfile(IMAP4('imap.domain.com', 143), 'MAILFILE_DATA')
 
     # This is the key used to encrypt/decrypt our data
-    ifap.set_encryption_key(your_secret_here)
+    mailfile.set_encryption_key(your_secret_here)
 
     # Do whatever IMAP authentication dance you need, see imaplib.
-    ifap.imap.login(...)
+    mailfile.imap.login(...)
 
-    with ifap:
-        with ifap.open('/magic/path/name.txt', 'w') as fd:
+    with mailfile:
+        with mailfile.open('/magic/path/name.txt', 'w') as fd:
             fd.write('hello world')
 
         # Trying to read the file here would fail, unless we sync state:
-        ifap.synchronize()
+        mailfile.synchronize()
 
-    with ifap.open('/magic/path/name.txt', 'r') as fd:
+    with mailfile.open('/magic/path/name.txt', 'r') as fd:
         print(fd.read())
 
 
@@ -92,15 +94,15 @@ These all do roughly what you would expect:
 
 This code is: (C) Copyright 2019, Bjarni R. Einarsson <bre@mailpile.is>
 
-Ifaplib is free software: you can redistribute it and/or modify
+Mailfile is free software: you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as
 published by the Free Software Foundation, either version 3 of
 the License, or (at your option) any later version.
 
-Ifaplib is distributed in the hope that it will be useful,
+Mailfile is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public
-License along with ifaplib. If not, see <https://www.gnu.org/licenses/>.
+License along with mailfile. If not, see <https://www.gnu.org/licenses/>.
