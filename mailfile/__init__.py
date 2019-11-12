@@ -408,6 +408,7 @@ class Mailfile(object):
             'To: %s' % self.config.email_to,
             'From: %s' % self.config.email_from,
             'Subject: %s' % subject,
+            'X-Keep-On-Server: manual-delete, not-email',
             'X-Mailfile:',
             self._reflow(
                 self._maybe_encrypt(xmailfile, b64encode=True),
